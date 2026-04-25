@@ -1,5 +1,9 @@
 name: ai-devops-saas
 
+# Build contexts are the *monorepo root* so the api/worker images can
+# COPY shared/ alongside their own packages. Volume mounts give us
+# fast hot-reload without rebuilding the image.
+
 services:
   db:
     image: postgres:16-alpine
@@ -27,7 +31,8 @@ services:
 
   api:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://app:app@db:5432/app
@@ -43,11 +48,40 @@ services:
       redis:
         condition: service_healthy
     volumes:
+      # Mount source for hot-reload. shared/ is mounted so changes there
+      # also reload uvicorn (it picks up everything under /install/lib).
       - ./backend/app:/app/app
-      - ./backend/alembic:/app/alembic
+      - ./shared/alembic:/app/alembic
+      - ./shared/shared:/install/lib/python3.12/site-packages/shared
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@db:5432/app
+      REDIS_URL: redis://redis:6379/0
+      ENV: dev
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./worker/worker:/install/lib/python3.12/site-packages/worker
+      - ./shared/shared:/install/lib/python3.12/site-packages/shared
+      # Mount the host docker socket so the worker can `docker build` user apps
+      # in dev. In prod this is replaced by remote-build via Buildx + BuildKit.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # In dev we run all queues in one process for simplicity.
+    command: >
+      celery -A worker.celery_app:app worker
+        -Q analyzer,dockergen,builder,deployer
+        --loglevel=info --concurrency=2
 
   frontend:
     build:

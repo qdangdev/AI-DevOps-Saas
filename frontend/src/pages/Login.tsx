@@ -1,26 +1,102 @@
-import { useSearchParams } from "react-router-dom";
+import { FormEvent, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { AxiosError } from "axios";
 import { auth } from "@/api/client";
+import { useAuthStore } from "@/stores/auth";
 
+/**
+ * Login page — supports both email/password and GitHub OAuth.
+ *
+ * GitHub button is a full-page navigation; the API redirects back to
+ * /auth/callback with the JWT in the URL fragment.
+ *
+ * Email/password is a normal POST that returns the JWT in the JSON body.
+ * We push it into the in-memory zustand store and route to /.
+ */
 export default function Login() {
   const [params] = useSearchParams();
-  const error = params.get("error");
+  const navigate = useNavigate();
+  const setToken = useAuthStore((s) => s.setToken);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const oauthError = params.get("error");
+
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setFormError(null);
+    setSubmitting(true);
+    try {
+      const res = await auth.login(email, password);
+      setToken(res.access_token);
+      navigate("/", { replace: true });
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      setFormError(ax.response?.data?.detail ?? "Sign-in failed. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
         <h1 className="text-2xl font-semibold mb-2">AI DevOps</h1>
         <p className="text-slate-400 mb-6">
-          Connect a repo. We'll analyze it, generate a Dockerfile, and deploy it for you.
+          Sign in to connect a repo, generate a Dockerfile, and deploy.
         </p>
 
-        {error && (
+        {oauthError && (
           <div className="mb-4 p-3 rounded-lg bg-red-950 border border-red-900 text-sm">
-            Sign-in failed: {error}
+            GitHub sign-in failed: {oauthError}
+          </div>
+        )}
+        {formError && (
+          <div className="mb-4 p-3 rounded-lg bg-red-950 border border-red-900 text-sm">
+            {formError}
           </div>
         )}
 
+        <form onSubmit={onSubmit} className="space-y-3">
+          <input
+            type="email"
+            required
+            autoComplete="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <input
+            type="password"
+            required
+            minLength={8}
+            autoComplete="current-password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium rounded-lg py-2.5 transition"
+          >
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+
+        <div className="my-5 flex items-center gap-3 text-xs text-slate-500">
+          <div className="h-px flex-1 bg-slate-800" />
+          <span>OR</span>
+          <div className="h-px flex-1 bg-slate-800" />
+        </div>
+
         <a
-          href={auth.loginUrl()}
+          href={auth.githubLoginUrl()}
           className="w-full inline-flex items-center justify-center gap-2 bg-white text-slate-900 font-medium rounded-lg py-2.5 hover:bg-slate-100 transition"
         >
           <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
@@ -28,6 +104,13 @@ export default function Login() {
           </svg>
           Continue with GitHub
         </a>
+
+        <p className="mt-6 text-sm text-slate-400 text-center">
+          New here?{" "}
+          <Link to="/signup" className="text-indigo-400 hover:text-indigo-300">
+            Create an account
+          </Link>
+        </p>
       </div>
     </div>
   );

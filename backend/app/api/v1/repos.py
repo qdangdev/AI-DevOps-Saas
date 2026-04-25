@@ -9,10 +9,10 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.core.security import decrypt
-from app.models.repo import Repo
-from app.schemas.repo import ConnectRepoRequest, GitHubRepoOut, RepoOut
-from app.services import github as gh
+from shared.core.security import decrypt
+from shared.models.repo import Repo
+from shared.schemas.repo import ConnectRepoRequest, GitHubRepoOut, RepoOut
+from shared.services import github as gh
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 log = structlog.get_logger(__name__)

@@ -1,4 +1,4 @@
-"""FastAPI app entrypoint."""
+"""FastAPI app entrypoint. Imports from `shared` for everything cross-cutting."""
 from contextlib import asynccontextmanager
 
 import structlog
@@ -7,9 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
-from app.core.config import get_settings
-from app.core.logging import configure_logging
-from app.services.github import close_client
+from shared.core.config import get_settings
+from shared.core.logging import configure_logging
+from shared.services.github import close_client
 
 settings = get_settings()
 

@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  backend:
+  python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,13 +14,19 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - working-directory: backend
+
+      # Editable installs in dependency order: shared first, then api + worker.
+      - name: Install packages
         run: |
           pip install --upgrade pip
-          pip install -e ".[dev]"
-      - working-directory: backend
-        run: ruff check .
-      - working-directory: backend
+          pip install -e ./shared
+          pip install -e './backend[dev]'
+          pip install -e './worker[dev]'
+
+      - name: Lint (ruff)
+        run: ruff check shared backend worker
+
+      - name: Backend tests
         env:
           DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
           REDIS_URL: redis://localhost:6379/0
@@ -28,6 +34,7 @@ jobs:
           ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           GITHUB_CLIENT_ID: ci
           GITHUB_CLIENT_SECRET: ci
+        working-directory: backend
         run: pytest -q
 
   frontend:

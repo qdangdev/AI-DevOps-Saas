@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Multi-stage: small final image, deterministic deps via uv lockfile.
+# API image. Build context is the *monorepo root* so we can COPY shared/.
 
 FROM python:3.12-slim AS builder
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -9,16 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+COPY shared/   ./shared/
+COPY backend/  ./backend/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --prefix=/install .
+    pip install --no-cache-dir --prefix=/install ./shared && \
+    pip install --no-cache-dir --prefix=/install ./backend
 
 # --- runtime ---
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/install/bin:$PATH" \
-    PYTHONPATH=/app
+    PATH="/install/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 curl \
@@ -27,9 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /install /install
 WORKDIR /app
-COPY app ./app
-COPY alembic ./alembic
-COPY alembic.ini ./
 
 USER app
 EXPOSE 8000

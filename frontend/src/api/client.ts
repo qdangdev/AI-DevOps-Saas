@@ -57,7 +57,29 @@ export const repos = {
   disconnect: (id: string) => api.delete(`/repos/${id}`),
 };
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  github_login: string | null;
+  avatar_url: string | null;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: AuthUser;
+}
+
 export const auth = {
-  loginUrl: () => `${baseURL}/auth/github/login`,
+  // GitHub OAuth — full-page redirect, server hands JWT back via URL fragment.
+  githubLoginUrl: () => `${baseURL}/auth/github/login`,
+  // Email/password — JSON in, JWT out. Caller stores the token in zustand.
+  signup: (email: string, password: string) =>
+    api.post<TokenResponse>("/auth/signup", { email, password }).then((r) => r.data),
+  login: (email: string, password: string) =>
+    api.post<TokenResponse>("/auth/login", { email, password }).then((r) => r.data),
+  // Protected — used by RequireAuth on app load to validate the stored token.
+  me: () => api.get<AuthUser>("/auth/me").then((r) => r.data),
   logout: () => api.post("/auth/logout"),
 };

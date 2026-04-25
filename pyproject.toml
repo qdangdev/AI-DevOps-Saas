@@ -1,0 +1,45 @@
+# Root pyproject — NOT a package itself. This file only exists to give the
+# whole monorepo one shared ruff + mypy configuration so the three Python
+# packages (shared/, backend/, worker/) lint identically.
+#
+# Each subdirectory has its own pyproject.toml that *does* declare a package.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["shared", "backend", "worker"]
+extend-exclude = ["**/alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "C4",   # comprehensions
+    "SIM",  # flake8-simplify
+    "TCH",  # type-checking imports
+    "ASYNC",
+]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # FastAPI uses Depends() in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B011"]
+"**/alembic/env.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "shared:backend:worker"
+namespace_packages = true
+explicit_package_bases = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["celery.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
