@@ -36,6 +36,10 @@ class Repo(Base):
     )
 
     owner: Mapped["User"] = relationship(back_populates="repos")  # noqa: F821
+    deployments: Mapped[list["Deployment"]] = relationship(  # noqa: F821
+        back_populates="repo",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<Repo id={self.id} {self.full_name}>"

@@ -42,3 +42,8 @@ def enqueue_build(deployment_id: UUID) -> str:
 
 def enqueue_deploy(deployment_id: UUID) -> str:
     return _send("worker.tasks.deploy.run", str(deployment_id))
+
+
+def enqueue_teardown(deployment_id: UUID) -> str:
+    """Stop a deployment — release the ECS service, ALB rule + TG, ECR repo, DNS."""
+    return _send("worker.tasks.deploy.teardown", str(deployment_id))

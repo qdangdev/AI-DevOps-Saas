@@ -1,0 +1,157 @@
+"""Deployment model — one row per deploy attempt for a repo.
+
+Lifecycle (status field):
+
+    pending  ─►  analyzing  ─►  building  ─►  deploying  ─►  running
+                                                        └─►  failed
+                                                        └─►  stopped (manual teardown)
+
+Each transition is driven by a Celery task:
+
+    analyze   →  fills `framework`, `analysis` (JSON), and either advances or
+                 marks failed.
+    dockergen →  fills `dockerfile_id` (S3 key for the generated Dockerfile).
+    build     →  fills `image_uri` (the ECR `:tag` reference for what was pushed).
+    deploy    →  fills `url`, plus the AWS ARNs we need to delete the deployment
+                 cleanly later (task definition, target group, listener rule,
+                 ECS service, Route53 record).
+
+Why store the AWS ARNs:
+
+    Tearing down a deployment requires:
+      - deleting the ECS service (needs ecs_service_arn)
+      - deleting the target group (needs target_group_arn)
+      - deleting the listener rule (needs listener_rule_arn)
+      - removing the Route53 record (needs route53_record_name)
+      - deregistering the task definition (needs task_definition_arn)
+
+    Without these stored, we'd have to scan AWS by tag/slug to find what we
+    own, which is fragile in a noisy account.
+
+`error_message` and `failed_at_step` capture *why* a deploy failed so the
+frontend can show a useful message instead of "deployment failed".
+"""
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+from uuid import UUID, uuid4
+
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from shared.core.database import Base
+
+
+class DeploymentStatus(str, enum.Enum):
+    """Coarse-grained state. Sub-step progress goes on the Redis events stream,
+    not on the row — this enum is what the UI badges and what GET /deployments
+    sorts/filters by."""
+
+    PENDING = "pending"
+    ANALYZING = "analyzing"
+    BUILDING = "building"
+    DEPLOYING = "deploying"
+    RUNNING = "running"
+    FAILED = "failed"
+    STOPPED = "stopped"
+
+
+class DeploymentStep(str, enum.Enum):
+    """Which Celery task was running when the deployment failed (if any).
+
+    Distinct from `DeploymentStatus` because we need to know *where* in the
+    pipeline a failure happened — a failed analyze and a failed deploy require
+    different recovery actions.
+    """
+
+    ANALYZE = "analyze"
+    DOCKERGEN = "dockergen"
+    BUILD = "build"
+    DEPLOY = "deploy"
+
+
+class Deployment(Base):
+    __tablename__ = "deployments"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    repo_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # The branch/commit we deployed. Both nullable until analyze starts —
+    # we resolve them from the repo's default_branch + GitHub tip SHA.
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    # Stable per-deployment slug used for DNS + ECR repo + ECS service names.
+    # Generated at row creation so it's stable for the deployment's life.
+    # Indexed because the frontend looks up by slug.
+    slug: Mapped[str] = mapped_column(String(63), unique=True, index=True, nullable=False)
+
+    status: Mapped[DeploymentStatus] = mapped_column(
+        SAEnum(DeploymentStatus, name="deployment_status", native_enum=False, length=32),
+        nullable=False,
+        default=DeploymentStatus.PENDING,
+        index=True,
+    )
+
+    # --- AI analysis output ---
+    # The full AnalysisResult dict from shared.analysis.schemas.
+    # Stored as JSONB so we can query fields if we ever need to (e.g. "show
+    # me all FastAPI deployments"), but the row's primary client is the API,
+    # which just round-trips it to the frontend.
+    analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Convenience denormalization: the framework string from analysis. Lets us
+    # filter/group without a JSONB extract on every query.
+    framework: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    # --- Docker / image ---
+    # S3 key of the generated Dockerfile (for inspection / debugging).
+    dockerfile_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Final image reference once pushed: e.g. 123.dkr.ecr.us-east-1.amazonaws.com/repo:tag
+    image_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    # --- AWS resource handles (filled during deploy step, used for teardown) ---
+    ecr_repository_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    task_definition_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    target_group_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    listener_rule_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ecs_service_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    route53_record_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # --- Result ---
+    # The live URL once the deploy step finishes. Always https://{slug}.{apps_domain}.
+    url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # --- Failure diagnostics ---
+    failed_at_step: Mapped[DeploymentStep | None] = mapped_column(
+        SAEnum(DeploymentStep, name="deployment_step", native_enum=False, length=32),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- Timestamps ---
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    # Wall-clock when the deploy step finished successfully. Distinct from
+    # updated_at, which moves on every status flip.
+    deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    repo: Mapped["Repo"] = relationship(back_populates="deployments")  # noqa: F821
+
+    def __repr__(self) -> str:
+        return f"<Deployment id={self.id} slug={self.slug} status={self.status.value}>"
