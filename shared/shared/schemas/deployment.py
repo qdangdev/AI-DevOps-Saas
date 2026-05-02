@@ -53,6 +53,7 @@ class DeploymentDetailOut(DeploymentOut):
 
     image_uri: str | None
     analysis: dict | None
+    dockerfile_content: str | None
 
     ecr_repository_arn: str | None
     task_definition_arn: str | None

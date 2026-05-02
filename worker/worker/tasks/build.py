@@ -29,6 +29,7 @@ from sqlalchemy import select
 from shared.core.config import get_settings
 from shared.core.database import db_session
 from shared.core.security import decrypt
+from shared.docker import UnsupportedFrameworkError, generate_dockerfile
 from shared.models.deployment import Deployment, DeploymentStatus, DeploymentStep
 from shared.models.repo import Repo
 from shared.models.user import User
@@ -93,6 +94,9 @@ async def _do_build(deployment_id: UUID) -> dict:
         slug = deployment.slug
         clone_url = repo.clone_url
         branch = deployment.branch or repo.default_branch
+        # Pull the analysis blob now (while we have the session) so the
+        # generator can run inside the clone block without a second DB roundtrip.
+        analysis = deployment.analysis or {}
 
         # Mark transition to 'building' (caller may have left us in 'analyzing').
         deployment.status = DeploymentStatus.BUILDING
@@ -112,16 +116,40 @@ async def _do_build(deployment_id: UUID) -> dict:
     image_tag = "latest"
     image_uri = _settings.ecr_image_uri(slug, image_tag)
     head_sha: str = ""
+    dockerfile_content: str = ""
+    dockerfile_was_generated = False
     with git_runtime.shallow_clone(clone_url=clone_url, token=token, branch=branch) as repo_dir:
         head_sha = git_runtime.head_sha(repo_dir)
 
-        # 4. Locate the Dockerfile. For now we expect one at the repo root.
-        #    A future iteration can use the dockergen task's output here.
+        # 4. Find or generate the Dockerfile. Repo wins if it ships one — we
+        #    never overwrite a hand-written Dockerfile.
         dockerfile = _find_dockerfile(repo_dir)
         if dockerfile is None:
-            raise FileNotFoundError(
-                "no Dockerfile found at repo root. Run dockergen first or commit one."
-            )
+            # 4a. Generate from the analyzer's output. The analyzer task wrote
+            #     the AnalysisResult onto deployment.analysis before chaining
+            #     into us; if it isn't there we have nothing to base a
+            #     Dockerfile on, so we fail fast rather than guess.
+            if not analysis:
+                raise RuntimeError(
+                    "no Dockerfile in repo and no analysis on the deployment row — "
+                    "cannot generate. Was analyze.run skipped?"
+                )
+            try:
+                dockerfile_content = generate_dockerfile(analysis)
+            except UnsupportedFrameworkError as e:
+                # Surface a clean error message; don't retry — re-running
+                # won't change the framework.
+                raise RuntimeError(str(e)) from e
+            dockerfile = repo_dir / "Dockerfile"
+            dockerfile.write_text(dockerfile_content, encoding="utf-8")
+            dockerfile_was_generated = True
+            log.info("build.dockerfile_generated", deployment_id=str(deployment_id), bytes=len(dockerfile_content))
+            publish(str(deployment_id), "build.dockerfile_generated")
+        else:
+            # Capture the repo's Dockerfile too so the detail view can show
+            # exactly what we built — same rendering for repo-supplied vs
+            # generated, just a flag to tell them apart.
+            dockerfile_content = dockerfile.read_text(encoding="utf-8", errors="replace")
 
         # 5. Build + push. Stream lines into the deployment events stream so
         #    the frontend can show a live log.
@@ -147,8 +175,14 @@ async def _do_build(deployment_id: UUID) -> dict:
         deployment.ecr_repository_arn = ecr_arn
         if head_sha:
             deployment.commit_sha = head_sha
+        if dockerfile_content:
+            deployment.dockerfile_content = dockerfile_content
 
-    return {"image_uri": image_uri, "commit_sha": head_sha}
+    return {
+        "image_uri": image_uri,
+        "commit_sha": head_sha,
+        "dockerfile_generated": dockerfile_was_generated,
+    }
 
 
 def _find_dockerfile(repo_dir: Path) -> Path | None:
